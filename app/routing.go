@@ -43,7 +43,15 @@ type RoutingPacket struct {
 	RoutingChanges []*RoutingChange
 }
 
-func CopyPacket(packet *RoutingPacket) *RoutingPacket {
+type StandardPacket struct {
+	FromRouter     int
+	FromHost       int
+	ToRouter       int
+	ToHost         int
+	VisitedRouters []int
+}
+
+func CopyRoutingPacket(packet *RoutingPacket) *RoutingPacket {
 	copyPacket := new(RoutingPacket)
 	copyPacket.FromWho = packet.FromWho
 	for _, change := range packet.RoutingChanges {
@@ -55,12 +63,63 @@ func CopyPacket(packet *RoutingPacket) *RoutingPacket {
 	return copyPacket
 }
 
-type PacketQueue struct {
+type RoutingPacketQueue struct {
 	in  chan<- *RoutingPacket
 	out <-chan *RoutingPacket
 }
 
-func MakeUnboundedQueueOfPackets() *PacketQueue {
+type StandardPacketQueue struct {
+	in  chan<- *StandardPacket
+	out <-chan *StandardPacket
+}
+
+func MakeUnboundedQueueOfStandardPackets() *StandardPacketQueue {
+	in := make(chan *StandardPacket)
+	out := make(chan *StandardPacket)
+
+	go func() {
+		var inQueue []*StandardPacket
+
+		outCh := func() chan *StandardPacket {
+			if len(inQueue) == 0 {
+				return nil
+			}
+
+			return out
+		}
+
+		cur := func() *StandardPacket {
+			if len(inQueue) == 0 {
+				return nil
+			}
+
+			return inQueue[0]
+		}
+
+		for len(inQueue) > 0 || in != nil {
+			select {
+			case oc, ok := <-in:
+				if !ok {
+					in = nil
+				} else {
+					inQueue = append(inQueue, oc)
+				}
+			case outCh() <- cur():
+				if out != nil {
+					inQueue = inQueue[1:]
+				}
+			}
+		}
+
+	}()
+
+	newPacketQueue := new(StandardPacketQueue)
+	newPacketQueue.in = in
+	newPacketQueue.out = out
+	return newPacketQueue
+}
+
+func MakeUnboundedQueueOfRoutingPackets() *RoutingPacketQueue {
 	in := make(chan *RoutingPacket)
 	out := make(chan *RoutingPacket)
 
@@ -98,10 +157,9 @@ func MakeUnboundedQueueOfPackets() *PacketQueue {
 			}
 		}
 
-		close(out)
 	}()
 
-	newPacketQueue := new(PacketQueue)
+	newPacketQueue := new(RoutingPacketQueue)
 	newPacketQueue.in = in
 	newPacketQueue.out = out
 	return newPacketQueue

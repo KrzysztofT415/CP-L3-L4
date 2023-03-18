@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-const DELAY = 2
+const DELAY = 5
 
-func Sender(vertex *Vertex, print chan<- string, closingVariable *bool) {
+func RouterSender(vertex *Vertex, print chan<- string, closingVariable *bool) {
 	for {
 		if *closingVariable {
 			break
@@ -16,10 +16,10 @@ func Sender(vertex *Vertex, print chan<- string, closingVariable *bool) {
 		time.Sleep(time.Second * time.Duration(rand.New(rand.NewSource(time.Now().UnixNano())).Intn(DELAY)))
 
 		reader := NewReaderPermission()
-		vertex.ReaderLock.in <- reader
+		vertex.ReaderLock <- reader
 		<-reader.WatcherAccepted
 
-		print <- fmt.Sprintf("\tSender %d: reading neighbours\n", vertex.Id)
+		print <- fmt.Sprintf("\tRouterSender %d: reading routing table\n", vertex.Id)
 
 		packet := new(RoutingPacket)
 		packet.FromWho = vertex.Id
@@ -32,34 +32,34 @@ func Sender(vertex *Vertex, print chan<- string, closingVariable *bool) {
 		}
 
 		if len(packet.RoutingChanges) > 0 {
-			print <- fmt.Sprintf("\tSender %d: propagating packet  ", vertex.Id)
+			info := ""
 			for _, c := range packet.RoutingChanges {
-				print <- fmt.Sprintf("{%d %d} ", c.SourceId, c.NewCost)
+				info += fmt.Sprintf("{%d %d} ", c.SourceId, c.NewCost)
 			}
-			print <- " to : "
+			info += " to : "
 			for _, c := range vertex.NextVerticesInfo {
-				print <- fmt.Sprintf("%d ", c.Id)
+				info += fmt.Sprintf("%d ", c.Id)
 			}
-			print <- "\n"
+
+			print <- fmt.Sprintf("\tRouterSender %d: propagating packet  %s\n", vertex.Id, info)
 			for _, nextVertex := range vertex.NextVerticesInfo {
-				nextVertex.PacketQueue.in <- CopyPacket(packet)
+				nextVertex.RoutingPacketQueue.in <- CopyRoutingPacket(packet)
 			}
 		}
 
-		print <- fmt.Sprintf("\tSender %d: ended work\n", vertex.Id)
+		print <- fmt.Sprintf("\tRouterSender %d: ended work\n", vertex.Id)
 		readerLeaving := <-reader.ReaderEnded
 		readerLeaving <- true
 	}
-	close(vertex.PacketQueue.in)
 }
 
-func Receiver(vertex *Vertex, print chan<- string) {
-	for changePacket := range vertex.PacketQueue.out {
+func RouterReceiver(vertex *Vertex, print chan<- string) {
+	for changePacket := range vertex.RoutingPacketQueue.out {
 		writer := NewWriterPermission()
-		vertex.WriterLock.in <- writer
+		vertex.WriterLock <- writer
 		<-writer.WatcherAccepted
 
-		print <- fmt.Sprintf("\t\tReceiver %d: updating routing table as informed by %d\n", vertex.Id, changePacket.FromWho)
+		print <- fmt.Sprintf("\t\tRouterReceiver %d: updating routing table as informed by %d\n", vertex.Id, changePacket.FromWho)
 
 		for _, change := range changePacket.RoutingChanges {
 			if change.SourceId == vertex.Id {
@@ -68,12 +68,12 @@ func Receiver(vertex *Vertex, print chan<- string) {
 			newCost := 1 + change.NewCost
 			routingTable := vertex.ThisRoutingTable.RoutingInfos[change.SourceId]
 			if newCost < routingTable.Cost {
-				print <- fmt.Sprintf("\t\tReceiver %d: setting new route to %d (old: %d, new:%d) <-------------------------\n", vertex.Id, change.SourceId, routingTable.Cost, newCost)
+				print <- fmt.Sprintf("\t\tRouterReceiver %d: setting new route to %d (old: %d, new:%d) <-------------------------\n", vertex.Id, change.SourceId, routingTable.Cost, newCost)
 				routingTable.Cost = newCost
 				routingTable.NextHop = changePacket.FromWho
 				routingTable.Changed = true
 			} else {
-				print <- fmt.Sprintf("\t\tReceiver %d: route to %d not changed (old: %d, new:%d)\n", vertex.Id, change.SourceId, routingTable.Cost, newCost)
+				print <- fmt.Sprintf("\t\tRouterReceiver %d: route to %d not changed (old: %d, new:%d)\n", vertex.Id, change.SourceId, routingTable.Cost, newCost)
 			}
 		}
 
@@ -81,45 +81,107 @@ func Receiver(vertex *Vertex, print chan<- string) {
 	}
 }
 
-func Librarian(graph *Graph, print chan<- string, closingVariable *bool) {
+func RouterForwarder(vertex *Vertex, print chan<- string) {
+	for hostingPacket := range vertex.StandardPacketQueue.out {
+		print <- fmt.Sprintf("\t\t\tRouterForwarder %d: received standard packet from %d-%d to %d-%d\n", vertex.Id, hostingPacket.FromRouter, hostingPacket.FromHost, hostingPacket.ToRouter, hostingPacket.ToHost)
+
+		hostingPacket.VisitedRouters = append(hostingPacket.VisitedRouters, vertex.Id)
+
+		if hostingPacket.ToRouter == vertex.Id {
+			print <- fmt.Sprintf("\t\t\tRouterForwarder %d: giving to own host\n", vertex.Id)
+
+			vertex.HostsChannels[hostingPacket.ToHost] <- hostingPacket
+
+		} else {
+			reader := NewReaderPermission()
+			vertex.ReaderLock <- reader
+			<-reader.WatcherAccepted
+
+			nextHop := vertex.ThisRoutingTable.RoutingInfos[hostingPacket.ToRouter].NextHop
+			print <- fmt.Sprintf("\t\t\tRouterForwarder %d: forwarding to nextHop: %d\n", vertex.Id, nextHop)
+
+			for _, next := range vertex.NextVerticesInfo {
+				if next.Id == nextHop {
+					next.StandardPacketQueue.in <- hostingPacket
+					break
+				}
+			}
+
+			readerLeaving := <-reader.ReaderEnded
+			readerLeaving <- true
+		}
+
+		print <- fmt.Sprintf("\t\t\tRouterForwarder %d: ended work\n", vertex.Id)
+	}
+}
+
+func RouterReadWriteLock(vertex *Vertex, print chan<- string, closingVariable *bool) {
 	for {
 		if *closingVariable {
 			break
 		}
 		select {
-		case <-graph.ReaderLeaving:
-			print <- "Librarian: said bye to reader\n"
-			graph.ReadersCount--
+		case <-vertex.ReaderLeaving:
+			print <- fmt.Sprintf("RouterReadWriteLock %d: said bye to reader\n", vertex.Id)
+			vertex.ReaderIn = false
 			break
 
-		case writer := <-graph.WritersQueue.out:
-			print <- "Librarian: welcomed writer\n"
-			for {
-				if graph.ReadersCount == 0 {
-					print <- "Librarian: No readers left\n"
-					break
-				}
-				print <- "Librarian: Waiting for readers to leave\n"
-				<-graph.ReaderLeaving
-				graph.ReadersCount--
-				print <- "Librarian: said bye to reader\n"
+		case writer := <-vertex.WriterLock:
+			print <- fmt.Sprintf("RouterReadWriteLock %d: welcomed writer\n", vertex.Id)
+			if vertex.ReaderIn {
+				print <- fmt.Sprintf("RouterReadWriteLock %d: Waiting for reader to leave\n", vertex.Id)
+				<-vertex.ReaderLeaving
+				vertex.ReaderIn = false
+				print <- fmt.Sprintf("RouterReadWriteLock %d: said bye to reader\n", vertex.Id)
 			}
-			print <- "Librarian: writer was let in\n"
+			print <- fmt.Sprintf("RouterReadWriteLock %d: writer was let in\n", vertex.Id)
 			writer.WatcherAccepted <- true
 			<-writer.WriterEnded
-			print <- "Librarian: writer ended\n"
+			print <- fmt.Sprintf("RouterReadWriteLock %d: writer ended\n", vertex.Id)
 			break
 
-		case reader := <-graph.ReadersQueue.out:
-			print <- "Librarian: welcomed reader\n"
-			graph.ReadersCount++
-			print <- "Librarian: reader was let in\n"
+		case reader := <-vertex.ReaderLock:
+			print <- fmt.Sprintf("RouterReadWriteLock %d: welcomed reader\n", vertex.Id)
+			vertex.ReaderIn = true
+			print <- fmt.Sprintf("RouterReadWriteLock %d: reader was let in\n", vertex.Id)
 			reader.WatcherAccepted <- true
-			reader.ReaderEnded <- graph.ReaderLeaving
+			reader.ReaderEnded <- vertex.ReaderLeaving
 			break
 		}
 	}
-	close(graph.ReaderLeaving)
-	close(graph.WritersQueue.in)
-	close(graph.ReadersQueue.in)
+}
+
+func HostWorker(vertex *Vertex, print chan<- string, closingVariable *bool, thisHostId int, destinationHost int, destinationRouter int) {
+	time.Sleep(time.Millisecond * time.Duration(100))
+	print <- fmt.Sprintf("\tHostWorker %d-%d: sending packet to %d-%d\n", vertex.Id, thisHostId, destinationRouter, destinationHost)
+
+	packet := new(StandardPacket)
+	packet.FromHost = thisHostId
+	packet.FromRouter = vertex.Id
+	packet.ToHost = destinationHost
+	packet.ToRouter = destinationRouter
+	vertex.StandardPacketQueue.in <- packet
+
+	for {
+		if *closingVariable {
+			break
+		}
+		print <- fmt.Sprintf("\tHostWorker %d-%d: waiting for packet\n", vertex.Id, thisHostId)
+		packetR := <-vertex.HostsChannels[thisHostId]
+		path := ""
+		for _, r := range packetR.VisitedRouters {
+			path += fmt.Sprintf("%d ", r)
+		}
+		print <- fmt.Sprintf("\tHostWorker %d-%d: got packet | from %d-%d to %d-%d = %s\n", vertex.Id, thisHostId, packetR.FromRouter, packetR.FromHost, packetR.ToRouter, packetR.ToHost, path)
+
+		time.Sleep(time.Second * time.Duration(rand.New(rand.NewSource(time.Now().UnixNano())).Intn(DELAY)))
+		print <- fmt.Sprintf("\tHostWorker %d-%d: sending response to h:%d r:%d\n", vertex.Id, thisHostId, packetR.FromRouter, packetR.FromHost)
+
+		packetS := new(StandardPacket)
+		packetS.FromHost = thisHostId
+		packetS.FromRouter = vertex.Id
+		packetS.ToHost = packetR.FromHost
+		packetS.ToRouter = packetR.FromRouter
+		vertex.StandardPacketQueue.in <- packetS
+	}
 }

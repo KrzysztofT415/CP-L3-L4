@@ -7,27 +7,23 @@ import (
 )
 
 type Graph struct {
-	ReadersCount  int
-	ReaderLeaving chan bool
-	ReadersQueue  *ReaderQueue
-	WritersQueue  *WriterQueue
-
 	VerticesInfo []*Vertex
 }
 
 func NewGraph(n int, d int) *Graph {
 	newGraph := new(Graph)
-	newGraph.ReadersCount = 0
-	newGraph.ReaderLeaving = make(chan bool)
-	newGraph.ReadersQueue = MakeUnboundedQueueOfReaders()
-	newGraph.WritersQueue = MakeUnboundedQueueOfWriters()
 
 	//CREATING VERTICES WITH BASIC EDGES (i, i + 1)
 
+	rand.Seed(time.Now().UnixNano())
 	newGraph.VerticesInfo = make([]*Vertex, n)
-	newGraph.VerticesInfo[0] = NewVertex(0, n, newGraph.ReadersQueue, newGraph.WritersQueue)
+	hosts := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(6) + 1
+	newGraph.VerticesInfo[0] = NewVertex(0, n, hosts)
 	for i := 0; i < n-1; i++ {
-		newGraph.VerticesInfo[i+1] = NewVertex(i+1, n, newGraph.ReadersQueue, newGraph.WritersQueue)
+		time.Sleep(time.Microsecond * time.Duration(10))
+
+		hosts2 := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(6) + 1
+		newGraph.VerticesInfo[i+1] = NewVertex(i+1, n, hosts2)
 		newGraph.VerticesInfo[i].NextVerticesInfo = append(newGraph.VerticesInfo[i].NextVerticesInfo, newGraph.VerticesInfo[i+1])
 		newGraph.VerticesInfo[i+1].NextVerticesInfo = append(newGraph.VerticesInfo[i+1].NextVerticesInfo, newGraph.VerticesInfo[i])
 	}

@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
+	"math/rand"
 	"time"
 
 	"./app"
 )
 
-const WORKINGTIME = 4
+const WORKINGTIME = 6
 
 func main() {
 	//n - vertices, d - shortcuts
@@ -22,8 +23,12 @@ func main() {
 			}
 			fmt.Print(info)
 		}
-		close(printServerChannel)
 		donePrinting <- true
+	}()
+
+	silentServerChannel := make(chan string, 50)
+	go func() {
+		for range silentServerChannel {}
 	}()
 
 	graph := app.NewGraph(n, d)
@@ -34,12 +39,27 @@ func main() {
 	doneWorking := false
 
 	printServerChannel <- "START OF TRANSFER\n\n"
-	go app.Librarian(graph, printServerChannel, &doneWorking)
 	for _, vertex := range graph.VerticesInfo {
-		go app.Receiver(vertex, printServerChannel)
+		go app.RouterReadWriteLock(vertex, silentServerChannel, &doneWorking)
+		go app.RouterReceiver(vertex, silentServerChannel)
 	}
 	for _, vertex := range graph.VerticesInfo {
-		go app.Sender(vertex, printServerChannel, &doneWorking)
+		go app.RouterSender(vertex, silentServerChannel, &doneWorking)
+		go app.RouterForwarder(vertex, printServerChannel)
+	}
+	for _, vertex := range graph.VerticesInfo {
+		for j := 0; j < vertex.Hosts; j++ {
+			rand.Seed(time.Now().UnixNano())
+			time.Sleep(time.Microsecond * time.Duration(10))
+			for {
+				destR := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(len(graph.VerticesInfo))
+				if destR == vertex.Id { continue }
+
+				destH := rand.New(rand.NewSource(time.Now().UnixNano())).Intn(graph.VerticesInfo[destR].Hosts)
+				go app.HostWorker(vertex, printServerChannel, &doneWorking, j, destH, destR)
+				break
+			}
+		}
 	}
 
 	<-time.After(time.Second * time.Duration(WORKINGTIME))
@@ -50,13 +70,12 @@ func main() {
 
 	printServerChannel <- "EOF"
 	<-donePrinting
-	close(donePrinting)
 }
 
 func printGraph(graph *app.Graph, print chan<- string) {
-	print <- "---------------\n  GRAPH\nId:  Links:\n"
+	print <- "---------------\n  GRAPH\nHosts: Id:  Links:\n"
 	for _, v := range graph.VerticesInfo {
-		print <- fmt.Sprintf(" %d -> ", v.Id)
+		print <- fmt.Sprintf("%d   %d -> ", v.Hosts, v.Id)
 		for _, c := range v.NextVerticesInfo {
 			print <- fmt.Sprintf("%d ", c.Id)
 		}
