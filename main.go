@@ -1,9 +1,10 @@
 package main
 
 import (
-	"PW-L3-GO/app"
 	"fmt"
 	"time"
+
+	"./app"
 )
 
 const WORKINGTIME = 4
